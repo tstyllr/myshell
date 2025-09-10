@@ -1,0 +1,531 @@
+#!/bin/bash
+
+# Git Worktree Manager
+# A shell script that replicates the functionality of the /worktree Claude Code command
+# Manages multiple git worktrees in a .trees folder
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_colored() {
+    local color=$1
+    local message=$2
+    echo -e "${color}${message}${NC}"
+}
+
+# Function to check if we're in a git repository
+check_git_repo() {
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        print_colored "$RED" "❌ Error: Not in a git repository."
+        exit 1
+    fi
+}
+
+# Function to show help
+show_help() {
+    echo "Git Worktree Manager"
+    echo
+    echo "USAGE:"
+    echo "  $0 [COMMAND] [ARGUMENTS]"
+    echo
+    echo "COMMANDS:"
+    echo "  list                      List all worktrees"
+    echo "  create <branch1,branch2>  Create worktrees for specified branches"
+    echo "  start <branch1,branch2>   Create, run, and open worktrees (all-in-one command)"
+    echo "  open [branch1,branch2]    Open all or specified worktrees in VS Code"
+    echo "  remove [branch1,branch2]  Remove all or specified worktrees"
+    echo "  merge [branch1,branch2]   Merge all or specified worktrees into current branch"
+    echo "  run <branch1,branch2>     Run npm dev server for specified worktrees in new terminal windows"
+    echo "  help                      Show this help message"
+    echo
+    echo "EXAMPLES:"
+    echo "  $0 list"
+    echo "  $0 create hotfix,dev,feature"
+    echo "  $0 start dev,feature,hotfix"
+    echo "  $0 open"
+    echo "  $0 open dev,hotfix,feature"
+    echo "  $0 remove"
+    echo "  $0 remove dev,hotfix"
+    echo "  $0 merge"
+    echo "  $0 merge feature,hotfix"
+    echo "  $0 run foo,bar"
+    echo "  $0 run dev"
+    echo
+    echo "DESCRIPTION:"
+    echo "  This script manages git worktrees in a .trees folder, allowing you to work"
+    echo "  on multiple branches simultaneously without switching between them."
+}
+
+# Function to list all worktrees
+list_worktrees() {
+    print_colored "$CYAN" "📋 Listing all worktrees..."
+    echo
+    
+    worktree_output=$(git worktree list 2>/dev/null)
+    
+    if [ -z "$worktree_output" ]; then
+        print_colored "$RED" "❌ No worktrees found."
+        exit 0
+    fi
+    
+    total_count=0
+    trees_count=0
+    current_branch=$(git branch --show-current)
+    
+    print_colored "$GREEN" "🌳 All Git Worktrees:"
+    echo "---"
+    
+    while IFS= read -r line; do
+        ((total_count++))
+        
+        path=$(echo "$line" | awk '{print $1}')
+        branch_info=$(echo "$line" | sed 's/^[^ ]* *//')
+        
+        if [[ "$path" == *"/.trees/"* ]]; then
+            ((trees_count++))
+            branch_name=$(basename "$path")
+            if [ "$branch_name" = "$current_branch" ]; then
+                echo "  📍 $path → [$branch_info] (current)"
+            else
+                echo "  📂 $path → [$branch_info]"
+            fi
+        else
+            if [[ "$branch_info" == *"$current_branch"* ]]; then
+                echo "  🏠 $path → [$branch_info] (main repository - current)"
+            else
+                echo "  🏠 $path → [$branch_info] (main repository)"
+            fi
+        fi
+    done <<< "$worktree_output"
+    
+    echo "---"
+    print_colored "$BLUE" "📊 Summary:"
+    echo "  🏠 Main repository: 1"
+    echo "  📂 .trees worktrees: $trees_count"
+    echo "  📋 Total worktrees: $total_count"
+    
+    if [ -d ".trees" ] && [ $trees_count -gt 0 ]; then
+        echo
+        print_colored "$YELLOW" "💡 Tips:"
+        echo "  • Switch to worktree: cd .trees/{branch-name}"
+        echo "  • Open in VS Code: $0 open [branch1,branch2,...]"
+        echo "  • Remove worktrees: $0 remove [branch1,branch2,...]"
+        echo "  • Merge worktrees: $0 merge [branch1,branch2,...]"
+    elif [ $trees_count -eq 0 ]; then
+        echo
+        print_colored "$YELLOW" "💡 No .trees worktrees found. Create some with: $0 create branch1,branch2,branch3"
+    fi
+}
+
+# Function to create worktrees
+create_worktrees() {
+    local branches="$1"
+    
+    if [ -z "$branches" ]; then
+        print_colored "$RED" "❌ Error: No branches specified for creation."
+        echo "Usage: $0 create branch1,branch2,branch3"
+        exit 1
+    fi
+    
+    print_colored "$GREEN" "🌳 Creating worktrees for branches: $branches"
+    mkdir -p .trees
+    
+    IFS=',' read -ra BRANCHES <<< "$branches"
+    created_count=0
+    
+    for branch in "${BRANCHES[@]}"; do
+        branch=$(echo "$branch" | xargs)
+        echo "Creating worktree for branch: $branch"
+        
+        if git show-ref --verify --quiet refs/heads/"$branch"; then
+            echo "Branch $branch exists locally"
+            if git worktree add .trees/"$branch" "$branch" 2>/dev/null; then
+                print_colored "$GREEN" "✅ Worktree created at .trees/$branch"
+                ((created_count++))
+            else
+                print_colored "$YELLOW" "⚠️  Worktree for $branch may already exist"
+            fi
+        else
+            echo "Branch $branch does not exist locally, creating new branch"
+            if git worktree add -b "$branch" .trees/"$branch" 2>/dev/null; then
+                print_colored "$GREEN" "✅ New branch and worktree created at .trees/$branch"
+                ((created_count++))
+            else
+                print_colored "$RED" "❌ Failed to create worktree for $branch"
+            fi
+        fi
+        echo "---"
+    done
+    
+    print_colored "$GREEN" "✅ Worktree creation completed! ($created_count worktrees created)"
+}
+
+# Function to remove worktrees
+remove_worktrees() {
+    local branches="$1"
+    
+    if [ ! -d ".trees" ]; then
+        print_colored "$RED" "❌ No .trees directory found. Nothing to remove."
+        exit 0
+    fi
+    
+    current_branch=$(git branch --show-current)
+    echo "Current branch: $current_branch"
+    
+    if [ -z "$branches" ]; then
+        print_colored "$YELLOW" "🗑️  Removing all worktrees and associated branches..."
+        
+        removed_count=0
+        for worktree_dir in .trees/*/; do
+            if [ -d "$worktree_dir" ]; then
+                branch_name=$(basename "$worktree_dir")
+                echo "Removing worktree: $branch_name"
+                
+                git worktree remove "$worktree_dir" --force 2>/dev/null || true
+                
+                if [ "$branch_name" != "main" ] && [ "$branch_name" != "master" ] && [ "$branch_name" != "$current_branch" ]; then
+                    echo "Deleting branch: $branch_name"
+                    git branch -D "$branch_name" 2>/dev/null || true
+                else
+                    echo "Keeping protected branch: $branch_name"
+                fi
+                ((removed_count++))
+                echo "---"
+            fi
+        done
+        
+        rm -rf .trees
+        print_colored "$GREEN" "✅ All worktrees ($removed_count) and branches removed successfully!"
+    else
+        print_colored "$YELLOW" "🗑️  Removing specified worktrees: $branches"
+        
+        IFS=',' read -ra REQUESTED_BRANCHES <<< "$branches"
+        removed_count=0
+        skipped_count=0
+        
+        for branch in "${REQUESTED_BRANCHES[@]}"; do
+            branch=$(echo "$branch" | xargs)
+            
+            if [ -d ".trees/$branch" ]; then
+                echo "Removing worktree: $branch"
+                
+                git worktree remove ".trees/$branch" --force 2>/dev/null || true
+                
+                if [ "$branch" != "main" ] && [ "$branch" != "master" ] && [ "$branch" != "$current_branch" ]; then
+                    echo "Deleting branch: $branch"
+                    git branch -D "$branch" 2>/dev/null || true
+                else
+                    echo "Keeping protected branch: $branch"
+                fi
+                ((removed_count++))
+            else
+                print_colored "$YELLOW" "⚠️  Worktree not found for branch: $branch (skipping)"
+                ((skipped_count++))
+            fi
+            echo "---"
+        done
+        
+        if [ -z "$(ls -A .trees 2>/dev/null)" ]; then
+            rm -rf .trees
+            print_colored "$CYAN" "🧹 Cleaned up empty .trees directory"
+        fi
+        
+        print_colored "$BLUE" "📊 Remove Summary:"
+        echo "  ✅ Removed worktrees: $removed_count"
+        echo "  ⏭️  Skipped (not found): $skipped_count"
+        print_colored "$GREEN" "✅ Specified worktrees removal completed!"
+    fi
+}
+
+# Function to open worktrees in VS Code
+open_worktrees() {
+    local branches="$1"
+    
+    if [ ! -d ".trees" ]; then
+        print_colored "$RED" "❌ No .trees directory found. No worktrees to open."
+        exit 0
+    fi
+    
+    if [ -z "$branches" ]; then
+        print_colored "$CYAN" "🚀 Opening all worktrees in VS Code..."
+        
+        opened_count=0
+        for worktree_dir in .trees/*/; do
+            if [ -d "$worktree_dir" ]; then
+                branch_name=$(basename "$worktree_dir")
+                echo "Opening worktree: $branch_name"
+                
+                if command -v code >/dev/null 2>&1; then
+                    code "$worktree_dir"
+                    print_colored "$GREEN" "✅ Opened .trees/$branch_name in VS Code"
+                    ((opened_count++))
+                else
+                    print_colored "$RED" "❌ VS Code command 'code' not found. Please install VS Code CLI."
+                    exit 1
+                fi
+                echo "---"
+            fi
+        done
+        
+        print_colored "$GREEN" "✅ All worktrees ($opened_count) opened in VS Code!"
+    else
+        print_colored "$CYAN" "🚀 Opening specified worktrees in VS Code: $branches"
+        
+        IFS=',' read -ra REQUESTED_BRANCHES <<< "$branches"
+        opened_count=0
+        not_found_count=0
+        
+        for branch in "${REQUESTED_BRANCHES[@]}"; do
+            branch=$(echo "$branch" | xargs)
+            
+            if [ -d ".trees/$branch" ]; then
+                echo "Opening worktree: $branch"
+                
+                if command -v code >/dev/null 2>&1; then
+                    code ".trees/$branch"
+                    print_colored "$GREEN" "✅ Opened .trees/$branch in VS Code"
+                    ((opened_count++))
+                else
+                    print_colored "$RED" "❌ VS Code command 'code' not found. Please install VS Code CLI."
+                    exit 1
+                fi
+            else
+                print_colored "$YELLOW" "⚠️  Worktree not found for branch: $branch (skipping)"
+                ((not_found_count++))
+            fi
+            echo "---"
+        done
+        
+        print_colored "$BLUE" "📊 Open Summary:"
+        echo "  ✅ Opened in VS Code: $opened_count"
+        echo "  ⏭️  Not found (skipped): $not_found_count"
+        print_colored "$GREEN" "✅ Specified worktrees opening completed!"
+    fi
+}
+
+# Function to merge worktrees
+merge_worktrees() {
+    local branches="$1"
+    
+    if [ ! -d ".trees" ]; then
+        print_colored "$RED" "❌ No .trees directory found. No worktrees to merge."
+        exit 0
+    fi
+    
+    current_branch=$(git branch --show-current)
+    echo "Current branch: $current_branch"
+    
+    if [ -z "$branches" ]; then
+        print_colored "$CYAN" "🔀 Merging all worktree branches into current branch..."
+        
+        branches_to_merge=()
+        for worktree_dir in .trees/*/; do
+            if [ -d "$worktree_dir" ]; then
+                branch_name=$(basename "$worktree_dir")
+                if [ "$branch_name" != "$current_branch" ]; then
+                    branches_to_merge+=("$branch_name")
+                fi
+            fi
+        done
+    else
+        print_colored "$CYAN" "🔀 Merging specified worktree branches into current branch: $branches"
+        
+        IFS=',' read -ra REQUESTED_BRANCHES <<< "$branches"
+        branches_to_merge=()
+        for branch in "${REQUESTED_BRANCHES[@]}"; do
+            branch=$(echo "$branch" | xargs)
+            if [ -d ".trees/$branch" ] && [ "$branch" != "$current_branch" ]; then
+                branches_to_merge+=("$branch")
+            elif [ "$branch" = "$current_branch" ]; then
+                print_colored "$YELLOW" "⏭️  Skipping current branch: $branch"
+            else
+                print_colored "$YELLOW" "⚠️  Worktree not found for branch: $branch (skipping)"
+            fi
+        done
+    fi
+    
+    if [ ${#branches_to_merge[@]} -eq 0 ]; then
+        print_colored "$RED" "❌ No branches found to merge (or all branches are the same as current branch)."
+        exit 0
+    fi
+    
+    echo "Found branches to merge: ${branches_to_merge[*]}"
+    echo "---"
+    
+    merge_success=0
+    merge_conflicts=0
+    for branch in "${branches_to_merge[@]}"; do
+        echo "Merging branch: $branch"
+        
+        if git merge "$branch" --no-edit; then
+            print_colored "$GREEN" "✅ Successfully merged: $branch"
+            ((merge_success++))
+        else
+            print_colored "$YELLOW" "⚠️  Merge conflict detected for: $branch"
+            echo "Please resolve conflicts manually and commit, then run the merge command again."
+            ((merge_conflicts++))
+            git merge --abort 2>/dev/null || true
+        fi
+        echo "---"
+    done
+    
+    print_colored "$BLUE" "📊 Merge Summary:"
+    echo "  ✅ Successful merges: $merge_success"
+    echo "  ⚠️  Conflicts encountered: $merge_conflicts"
+    
+    if [ $merge_conflicts -eq 0 ]; then
+        print_colored "$GREEN" "🎉 All specified branches merged successfully!"
+    else
+        print_colored "$YELLOW" "⚠️  Some merges had conflicts. Please resolve them manually."
+    fi
+}
+
+# Function to start worktrees (create + run + open)
+start_worktrees() {
+    local branches="$1"
+    
+    if [ -z "$branches" ]; then
+        print_colored "$RED" "❌ Error: No branches specified for starting."
+        echo "Usage: $0 start branch1,branch2,branch3"
+        exit 1
+    fi
+    
+    print_colored "$CYAN" "🚀 Starting worktrees for branches: $branches"
+    echo "This will create, run, and open the specified worktrees..."
+    echo "---"
+    
+    # Step 1: Create worktrees
+    print_colored "$BLUE" "Step 1: Creating worktrees..."
+    create_worktrees "$branches"
+    echo
+    
+    # Step 2: Run worktrees in terminal windows
+    print_colored "$BLUE" "Step 2: Starting development servers..."
+    run_worktrees "$branches"
+    echo
+    
+    # Step 3: Open worktrees in VS Code
+    print_colored "$BLUE" "Step 3: Opening in VS Code..."
+    open_worktrees "$branches"
+    echo
+    
+    print_colored "$GREEN" "🎉 All worktrees have been started successfully!"
+    print_colored "$CYAN" "💡 Next steps:"
+    echo "  • Check your terminal windows for development servers"
+    echo "  • VS Code windows should be opening automatically"
+    echo "  • Use 'worktree list' to see all active worktrees"
+}
+
+# Function to run worktrees in new terminal windows
+run_worktrees() {
+    local branches="$1"
+    
+    if [ -z "$branches" ]; then
+        print_colored "$RED" "❌ Error: No branches specified for running."
+        echo "Usage: $0 run branch1,branch2,branch3"
+        exit 1
+    fi
+    
+    if [ ! -d ".trees" ]; then
+        print_colored "$RED" "❌ No .trees directory found. No worktrees to run."
+        exit 0
+    fi
+    
+    print_colored "$CYAN" "🚀 Starting npm dev servers for specified worktrees: $branches"
+    
+    IFS=',' read -ra REQUESTED_BRANCHES <<< "$branches"
+    started_count=0
+    not_found_count=0
+    port=3001
+    
+    for branch in "${REQUESTED_BRANCHES[@]}"; do
+        branch=$(echo "$branch" | xargs)
+        
+        if [ -d ".trees/$branch" ]; then
+            echo "Starting worktree: $branch on port $port"
+            
+            # Get absolute path to worktree
+            worktree_path=$(pwd)/.trees/$branch
+            
+            # Open new terminal window and run npm commands
+            osascript -e "
+            tell application \"Terminal\"
+                do script \"cd '$worktree_path' && echo 'Installing dependencies for $branch...' && npm i && echo 'Starting development server on port $port...' && npm run dev -- -p $port\"
+                activate
+            end tell
+            "
+            
+            print_colored "$GREEN" "✅ Started $branch on port $port in new terminal window"
+            ((started_count++))
+            ((port++))
+        else
+            print_colored "$YELLOW" "⚠️  Worktree not found for branch: $branch (skipping)"
+            ((not_found_count++))
+        fi
+        echo "---"
+    done
+    
+    print_colored "$BLUE" "📊 Run Summary:"
+    echo "  ✅ Started in terminal: $started_count"
+    echo "  ⏭️  Not found (skipped): $not_found_count"
+    print_colored "$GREEN" "✅ Worktree run command completed!"
+}
+
+# Main function
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+    
+    check_git_repo
+    
+    case "$1" in
+        "list")
+            list_worktrees
+            ;;
+        "create")
+            create_worktrees "$2"
+            ;;
+        "start")
+            start_worktrees "$2"
+            ;;
+        "open")
+            open_worktrees "$2"
+            ;;
+        "remove")
+            remove_worktrees "$2"
+            ;;
+        "merge")
+            merge_worktrees "$2"
+            ;;
+        "run")
+            run_worktrees "$2"
+            ;;
+        "help"|"-h"|"--help")
+            show_help
+            ;;
+        *)
+            if [[ "$1" != *","* ]]; then
+                print_colored "$RED" "❌ Unknown command: $1"
+                echo
+                show_help
+                exit 1
+            else
+                # Assume it's branch list for creation
+                create_worktrees "$1"
+            fi
+            ;;
+    esac
+}
+
+# Run the main function with all arguments
+main "$@"
