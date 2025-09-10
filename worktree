@@ -444,7 +444,7 @@ run_worktrees() {
     IFS=',' read -ra REQUESTED_BRANCHES <<< "$branches"
     started_count=0
     not_found_count=0
-    port=3001
+    port=3000
     
     for branch in "${REQUESTED_BRANCHES[@]}"; do
         branch=$(echo "$branch" | xargs)
