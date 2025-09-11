@@ -579,6 +579,8 @@ run_worktrees() {
             osascript -e "
             tell application \"Terminal\"
                 do script \"cd '$worktree_path' && echo 'Installing dependencies for $branch...' && npm i && echo 'Starting development server on port $use_port...' && npm run dev -- -p $use_port\"
+                set custom title of front window to \"$branch:$use_port\"
+                set title displays custom title of front window to true
                 activate
             end tell
             "
