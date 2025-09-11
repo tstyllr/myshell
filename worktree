@@ -29,6 +29,56 @@ check_git_repo() {
     fi
 }
 
+# Function to parse branch:port format
+parse_branch_port() {
+    local input="$1"
+    local branch=""
+    local port=""
+    
+    if [[ "$input" == *":"* ]]; then
+        branch="${input%:*}"
+        port="${input#*:}"
+        
+        # Validate port number
+        if [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+            print_colored "$RED" "❌ Invalid port: $port (must be between 1024-65535)"
+            return 1
+        fi
+    else
+        branch="$input"
+        port=""
+    fi
+    
+    echo "$branch|$port"
+}
+
+# Function to check if port is available
+check_port_available() {
+    local port="$1"
+    
+    if lsof -i :$port >/dev/null 2>&1; then
+        return 1  # Port is in use
+    else
+        return 0  # Port is available
+    fi
+}
+
+# Function to get next available port starting from given port
+get_next_available_port() {
+    local start_port="$1"
+    local port="$start_port"
+    
+    while ! check_port_available "$port"; do
+        ((port++))
+        if [ "$port" -gt 65535 ]; then
+            print_colored "$RED" "❌ No available ports found starting from $start_port"
+            return 1
+        fi
+    done
+    
+    echo "$port"
+}
+
 # Function to show help
 show_help() {
     echo "Git Worktree Manager"
@@ -37,31 +87,39 @@ show_help() {
     echo "  $0 [COMMAND] [ARGUMENTS]"
     echo
     echo "COMMANDS:"
-    echo "  list                      List all worktrees"
-    echo "  create <branch1,branch2>  Create worktrees for specified branches"
-    echo "  start <branch1,branch2>   Create, run, and open worktrees (all-in-one command)"
-    echo "  open [branch1,branch2]    Open all or specified worktrees in VS Code"
-    echo "  remove [branch1,branch2]  Remove all or specified worktrees"
-    echo "  merge [branch1,branch2]   Merge all or specified worktrees into current branch"
-    echo "  run <branch1,branch2>     Run npm dev server for specified worktrees in new terminal windows"
-    echo "  help                      Show this help message"
+    echo "  list                         List all worktrees"
+    echo "  create <branch1,branch2>     Create worktrees for specified branches"
+    echo "  start <branch1[:port1],..>   Create, run, and open worktrees (supports port specification)"
+    echo "  open [branch1,branch2]       Open all or specified worktrees in VS Code"
+    echo "  remove [branch1,branch2]     Remove all or specified worktrees"
+    echo "  merge [branch1,branch2]      Merge all or specified worktrees into current branch"
+    echo "  run <branch1[:port1],..>     Run npm dev server for worktrees (supports port specification)"
+    echo "  help                         Show this help message"
     echo
     echo "EXAMPLES:"
     echo "  $0 list"
     echo "  $0 create hotfix,dev,feature"
     echo "  $0 start dev,feature,hotfix"
+    echo "  $0 start dev:3000,staging:3001,feature:3005"
+    echo "  $0 start dev:3000,staging,feature"
     echo "  $0 open"
     echo "  $0 open dev,hotfix,feature"
     echo "  $0 remove"
     echo "  $0 remove dev,hotfix"
     echo "  $0 merge"
     echo "  $0 merge feature,hotfix"
-    echo "  $0 run foo,bar"
-    echo "  $0 run dev"
+    echo "  $0 run foo:3000,bar:3001"
+    echo "  $0 run dev:3000,staging"
     echo
     echo "DESCRIPTION:"
     echo "  This script manages git worktrees in a .trees folder, allowing you to work"
     echo "  on multiple branches simultaneously without switching between them."
+    echo ""
+    echo "PORT SPECIFICATION:"
+    echo "  Use branch:port format to specify custom ports (1024-65535):"
+    echo "  • branch:3000         - Run on port 3000"
+    echo "  • branch1:3000,branch2 - Mixed: branch1 on port 3000, branch2 auto-assigned"
+    echo "  • If port is occupied, next available port will be used automatically"
 }
 
 # Function to list all worktrees
@@ -394,7 +452,11 @@ start_worktrees() {
     
     if [ -z "$branches" ]; then
         print_colored "$RED" "❌ Error: No branches specified for starting."
-        echo "Usage: $0 start branch1,branch2,branch3"
+        echo "Usage: $0 start branch1[:port1],branch2[:port2],branch3"
+        echo "Examples:"
+        echo "  $0 start dev,staging,feature"
+        echo "  $0 start dev:3000,staging:3001"
+        echo "  $0 start dev:3000,staging,feature:3005"
         exit 1
     fi
     
@@ -402,9 +464,25 @@ start_worktrees() {
     echo "This will create, run, and open the specified worktrees..."
     echo "---"
     
-    # Step 1: Create worktrees
+    # Step 1: Create worktrees (extract branch names only)
     print_colored "$BLUE" "Step 1: Creating worktrees..."
-    create_worktrees "$branches"
+    
+    # Extract branch names from branch:port format
+    IFS=',' read -ra REQUESTED_BRANCHES <<< "$branches"
+    pure_branches=()
+    
+    for branch_input in "${REQUESTED_BRANCHES[@]}"; do
+        branch_input=$(echo "$branch_input" | xargs)
+        parsed=$(parse_branch_port "$branch_input")
+        if [ $? -eq 0 ]; then
+            branch="${parsed%|*}"
+            pure_branches+=("$branch")
+        fi
+    done
+    
+    # Join pure branch names with commas
+    pure_branches_str=$(IFS=','; echo "${pure_branches[*]}")
+    create_worktrees "$pure_branches_str"
     echo
     
     # Step 2: Run worktrees in terminal windows
@@ -414,7 +492,7 @@ start_worktrees() {
     
     # Step 3: Open worktrees in VS Code
     print_colored "$BLUE" "Step 3: Opening in VS Code..."
-    open_worktrees "$branches"
+    open_worktrees "$pure_branches_str"
     echo
     
     print_colored "$GREEN" "🎉 All worktrees have been started successfully!"
@@ -430,7 +508,10 @@ run_worktrees() {
     
     if [ -z "$branches" ]; then
         print_colored "$RED" "❌ Error: No branches specified for running."
-        echo "Usage: $0 run branch1,branch2,branch3"
+        echo "Usage: $0 run branch1[:port1],branch2[:port2],branch3"
+        echo "Examples:"
+        echo "  $0 run dev:3000,staging:3001"
+        echo "  $0 run dev:3000,staging,feature:3005"
         exit 1
     fi
     
@@ -444,13 +525,52 @@ run_worktrees() {
     IFS=',' read -ra REQUESTED_BRANCHES <<< "$branches"
     started_count=0
     not_found_count=0
-    port=3000
+    auto_port=3000
     
-    for branch in "${REQUESTED_BRANCHES[@]}"; do
-        branch=$(echo "$branch" | xargs)
+    for branch_input in "${REQUESTED_BRANCHES[@]}"; do
+        branch_input=$(echo "$branch_input" | xargs)
+        
+        # Parse branch and port
+        parsed=$(parse_branch_port "$branch_input")
+        if [ $? -ne 0 ]; then
+            print_colored "$RED" "❌ Failed to parse: $branch_input"
+            ((not_found_count++))
+            continue
+        fi
+        
+        branch="${parsed%|*}"
+        specified_port="${parsed#*|}"
         
         if [ -d ".trees/$branch" ]; then
-            echo "Starting worktree: $branch on port $port"
+            # Determine port to use
+            if [ -n "$specified_port" ]; then
+                # Use specified port, check if available
+                if check_port_available "$specified_port"; then
+                    use_port="$specified_port"
+                    print_colored "$BLUE" "🔌 Using specified port $use_port for $branch"
+                else
+                    print_colored "$YELLOW" "⚠️  Port $specified_port is in use, finding next available port..."
+                    use_port=$(get_next_available_port "$specified_port")
+                    if [ $? -ne 0 ]; then
+                        print_colored "$RED" "❌ Cannot find available port for $branch"
+                        ((not_found_count++))
+                        continue
+                    fi
+                    print_colored "$BLUE" "🔌 Using alternative port $use_port for $branch"
+                fi
+            else
+                # Auto-assign port
+                use_port=$(get_next_available_port "$auto_port")
+                if [ $? -ne 0 ]; then
+                    print_colored "$RED" "❌ Cannot find available port for $branch"
+                    ((not_found_count++))
+                    continue
+                fi
+                auto_port=$((use_port + 1))
+                print_colored "$BLUE" "🔌 Auto-assigned port $use_port for $branch"
+            fi
+            
+            echo "Starting worktree: $branch on port $use_port"
             
             # Get absolute path to worktree
             worktree_path=$(pwd)/.trees/$branch
@@ -458,14 +578,13 @@ run_worktrees() {
             # Open new terminal window and run npm commands
             osascript -e "
             tell application \"Terminal\"
-                do script \"cd '$worktree_path' && echo 'Installing dependencies for $branch...' && npm i && echo 'Starting development server on port $port...' && npm run dev -- -p $port\"
+                do script \"cd '$worktree_path' && echo 'Installing dependencies for $branch...' && npm i && echo 'Starting development server on port $use_port...' && npm run dev -- -p $use_port\"
                 activate
             end tell
             "
             
-            print_colored "$GREEN" "✅ Started $branch on port $port in new terminal window"
+            print_colored "$GREEN" "✅ Started $branch on port $use_port in new terminal window"
             ((started_count++))
-            ((port++))
         else
             print_colored "$YELLOW" "⚠️  Worktree not found for branch: $branch (skipping)"
             ((not_found_count++))
