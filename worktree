@@ -79,6 +79,42 @@ get_next_available_port() {
     echo "$port"
 }
 
+# Function to check if a branch has unmerged commits compared to base branch
+check_unmerged_commits() {
+    local target_branch="$1"
+    local base_branch="$2"
+    
+    if [ -z "$target_branch" ] || [ -z "$base_branch" ]; then
+        return 1
+    fi
+    
+    # Check if both branches exist
+    if ! git show-ref --verify --quiet refs/heads/"$target_branch"; then
+        return 1
+    fi
+    
+    if ! git show-ref --verify --quiet refs/heads/"$base_branch"; then
+        return 1
+    fi
+    
+    # Get count of unmerged commits (commits in target_branch but not in base_branch)
+    local unmerged_count
+    unmerged_count=$(git rev-list "$base_branch".."$target_branch" --count 2>/dev/null)
+    
+    if [ "$unmerged_count" -gt 0 ]; then
+        print_colored "$YELLOW" "⚠️  Branch '$target_branch' has $unmerged_count unmerged commit(s):"
+        echo "   Recent unmerged commits:"
+        git log "$base_branch".."$target_branch" --oneline -5 2>/dev/null | sed 's/^/     • /'
+        if [ "$unmerged_count" -gt 5 ]; then
+            echo "     ... and $((unmerged_count - 5)) more commit(s)"
+        fi
+        echo
+        return 1  # Has unmerged commits
+    fi
+    
+    return 0  # No unmerged commits, safe to delete
+}
+
 # Function to show help
 show_help() {
     echo "Git Worktree Manager"
@@ -91,7 +127,7 @@ show_help() {
     echo "  create <branch1,branch2>     Create worktrees for specified branches"
     echo "  start <branch1[:port1],..>   Create, run, and open worktrees (supports port specification)"
     echo "  open [branch1,branch2]       Open all or specified worktrees in VS Code"
-    echo "  remove [branch1,branch2]     Remove all or specified worktrees"
+    echo "  remove [branch1,branch2] [--force]    Remove all or specified worktrees (with safety check)"
     echo "  merge [branch1,branch2]      Merge all or specified worktrees into current branch"
     echo "  run <branch1[:port1],..>     Run npm dev server for worktrees (supports port specification)"
     echo "  help                         Show this help message"
@@ -106,6 +142,8 @@ show_help() {
     echo "  $0 open dev,hotfix,feature"
     echo "  $0 remove"
     echo "  $0 remove dev,hotfix"
+    echo "  $0 remove --force"
+    echo "  $0 remove dev,hotfix --force"
     echo "  $0 merge"
     echo "  $0 merge feature,hotfix"
     echo "  $0 run foo:3000,bar:3001"
@@ -114,6 +152,12 @@ show_help() {
     echo "DESCRIPTION:"
     echo "  This script manages git worktrees in a .trees folder, allowing you to work"
     echo "  on multiple branches simultaneously without switching between them."
+    echo ""
+    echo "SAFETY FEATURES:"
+    echo "  • Remove operations check for unmerged commits before deletion"
+    echo "  • Shows detailed information about commits that would be lost"
+    echo "  • Prevents accidental data loss by requiring explicit confirmation"
+    echo "  • Use --force to bypass safety checks (DANGEROUS: may lose work!)"
     echo ""
     echo "PORT SPECIFICATION:"
     echo "  Use branch:port format to specify custom ports (1024-65535):"
@@ -229,6 +273,7 @@ create_worktrees() {
 # Function to remove worktrees
 remove_worktrees() {
     local branches="$1"
+    local force_remove="$2"
     
     if [ ! -d ".trees" ]; then
         print_colored "$RED" "❌ No .trees directory found. Nothing to remove."
@@ -240,6 +285,37 @@ remove_worktrees() {
     
     if [ -z "$branches" ]; then
         print_colored "$YELLOW" "🗑️  Removing all worktrees and associated branches..."
+        
+        # Pre-check: collect branches with unmerged commits
+        branches_with_unmerged=()
+        if [ "$force_remove" != "true" ]; then
+            for worktree_dir in .trees/*/; do
+                if [ -d "$worktree_dir" ]; then
+                    branch_name=$(basename "$worktree_dir")
+                    if [ "$branch_name" != "$current_branch" ]; then
+                        if ! check_unmerged_commits "$branch_name" "$current_branch"; then
+                            branches_with_unmerged+=("$branch_name")
+                        fi
+                    fi
+                fi
+            done
+            
+            # If there are unmerged branches, warn user
+            if [ ${#branches_with_unmerged[@]} -gt 0 ]; then
+                print_colored "$RED" "🚨 DANGER: The following branches have unmerged commits:"
+                for branch in "${branches_with_unmerged[@]}"; do
+                    echo "  • $branch"
+                done
+                echo
+                print_colored "$YELLOW" "These changes will be lost if you proceed!"
+                echo "Options:"
+                echo "  1. Cancel and merge these branches first: git merge <branch_name>"
+                echo "  2. Force delete anyway: $0 remove --force"
+                echo
+                print_colored "$RED" "❌ Operation cancelled to prevent data loss."
+                exit 1
+            fi
+        fi
         
         removed_count=0
         for worktree_dir in .trees/*/; do
@@ -266,6 +342,36 @@ remove_worktrees() {
         print_colored "$YELLOW" "🗑️  Removing specified worktrees: $branches"
         
         IFS=',' read -ra REQUESTED_BRANCHES <<< "$branches"
+        
+        # Pre-check: collect branches with unmerged commits
+        branches_with_unmerged=()
+        if [ "$force_remove" != "true" ]; then
+            for branch in "${REQUESTED_BRANCHES[@]}"; do
+                branch=$(echo "$branch" | xargs)
+                if [ -d ".trees/$branch" ] && [ "$branch" != "$current_branch" ]; then
+                    if ! check_unmerged_commits "$branch" "$current_branch"; then
+                        branches_with_unmerged+=("$branch")
+                    fi
+                fi
+            done
+            
+            # If there are unmerged branches, warn user
+            if [ ${#branches_with_unmerged[@]} -gt 0 ]; then
+                print_colored "$RED" "🚨 DANGER: The following branches have unmerged commits:"
+                for branch in "${branches_with_unmerged[@]}"; do
+                    echo "  • $branch"
+                done
+                echo
+                print_colored "$YELLOW" "These changes will be lost if you proceed!"
+                echo "Options:"
+                echo "  1. Cancel and merge these branches first: git merge <branch_name>"
+                echo "  2. Force delete anyway: $0 remove $branches --force"
+                echo
+                print_colored "$RED" "❌ Operation cancelled to prevent data loss."
+                exit 1
+            fi
+        fi
+        
         removed_count=0
         skipped_count=0
         
@@ -623,7 +729,20 @@ main() {
             open_worktrees "$2"
             ;;
         "remove")
-            remove_worktrees "$2"
+            # Parse --force option
+            force_flag="false"
+            branches_arg="$2"
+            
+            # Check if --force is in $2 or $3
+            if [ "$2" = "--force" ]; then
+                force_flag="true"
+                branches_arg="$3"
+            elif [ "$3" = "--force" ]; then
+                force_flag="true"
+                branches_arg="$2"
+            fi
+            
+            remove_worktrees "$branches_arg" "$force_flag"
             ;;
         "merge")
             merge_worktrees "$2"
