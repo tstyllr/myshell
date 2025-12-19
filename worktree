@@ -55,11 +55,46 @@ parse_branch_port() {
 # Function to check if port is available
 check_port_available() {
     local port="$1"
-    
+
     if lsof -i :$port >/dev/null 2>&1; then
         return 1  # Port is in use
     else
         return 0  # Port is available
+    fi
+}
+
+# Function to setup node_modules symbolic link for worktree
+setup_node_modules_link() {
+    local worktree_path="$1"
+    local branch_name="$2"
+
+    # Get absolute path to main project's node_modules
+    local main_node_modules="$(pwd)/node_modules"
+
+    # Check if main project has node_modules
+    if [ ! -d "$main_node_modules" ]; then
+        # Main project doesn't have node_modules, skip silently
+        return 0
+    fi
+
+    # Get absolute path to worktree's node_modules location
+    local worktree_node_modules="$(pwd)/$worktree_path/node_modules"
+
+    # Check if worktree already has node_modules
+    if [ -e "$worktree_node_modules" ]; then
+        # If it's already a symlink, skip
+        if [ -L "$worktree_node_modules" ]; then
+            return 0
+        fi
+        # If it's a directory, preserve it (skip)
+        if [ -d "$worktree_node_modules" ]; then
+            return 0
+        fi
+    fi
+
+    # Create symbolic link from worktree to main project's node_modules
+    if ln -s "$main_node_modules" "$worktree_node_modules" 2>/dev/null; then
+        print_colored "$CYAN" "🔗 Linked node_modules from main project"
     fi
 }
 
@@ -168,62 +203,29 @@ show_help() {
 
 # Function to list all worktrees
 list_worktrees() {
-    print_colored "$CYAN" "📋 Listing all worktrees..."
-    echo
-    
     worktree_output=$(git worktree list 2>/dev/null)
-    
+
     if [ -z "$worktree_output" ]; then
-        print_colored "$RED" "❌ No worktrees found."
+        echo ""
         exit 0
     fi
-    
-    total_count=0
-    trees_count=0
-    current_branch=$(git branch --show-current)
-    
-    print_colored "$GREEN" "🌳 All Git Worktrees:"
-    echo "---"
-    
+
+    worktree_names=()
+
     while IFS= read -r line; do
-        ((total_count++))
-        
         path=$(echo "$line" | awk '{print $1}')
-        branch_info=$(echo "$line" | sed 's/^[^ ]* *//')
-        
+
         if [[ "$path" == *"/.trees/"* ]]; then
-            ((trees_count++))
             branch_name=$(basename "$path")
-            if [ "$branch_name" = "$current_branch" ]; then
-                echo "  📍 $path → [$branch_info] (current)"
-            else
-                echo "  📂 $path → [$branch_info]"
-            fi
-        else
-            if [[ "$branch_info" == *"$current_branch"* ]]; then
-                echo "  🏠 $path → [$branch_info] (main repository - current)"
-            else
-                echo "  🏠 $path → [$branch_info] (main repository)"
-            fi
+            worktree_names+=("$branch_name")
         fi
     done <<< "$worktree_output"
-    
-    echo "---"
-    print_colored "$BLUE" "📊 Summary:"
-    echo "  🏠 Main repository: 1"
-    echo "  📂 .trees worktrees: $trees_count"
-    echo "  📋 Total worktrees: $total_count"
-    
-    if [ -d ".trees" ] && [ $trees_count -gt 0 ]; then
-        echo
-        print_colored "$YELLOW" "💡 Tips:"
-        echo "  • Switch to worktree: cd .trees/{branch-name}"
-        echo "  • Open in VS Code: $0 open [branch1,branch2,...]"
-        echo "  • Remove worktrees: $0 remove [branch1,branch2,...]"
-        echo "  • Merge worktrees: $0 merge [branch1,branch2,...]"
-    elif [ $trees_count -eq 0 ]; then
-        echo
-        print_colored "$YELLOW" "💡 No .trees worktrees found. Create some with: $0 create branch1,branch2,branch3"
+
+    # Output comma-separated names
+    if [ ${#worktree_names[@]} -gt 0 ]; then
+        IFS=',' ; echo "${worktree_names[*]}"
+    else
+        echo ""
     fi
 }
 
@@ -251,6 +253,7 @@ create_worktrees() {
             echo "Branch $branch exists locally"
             if git worktree add .trees/"$branch" "$branch" 2>/dev/null; then
                 print_colored "$GREEN" "✅ Worktree created at .trees/$branch"
+                setup_node_modules_link ".trees/$branch" "$branch"
                 ((created_count++))
             else
                 print_colored "$YELLOW" "⚠️  Worktree for $branch may already exist"
@@ -259,6 +262,7 @@ create_worktrees() {
             echo "Branch $branch does not exist locally, creating new branch"
             if git worktree add -b "$branch" .trees/"$branch" 2>/dev/null; then
                 print_colored "$GREEN" "✅ New branch and worktree created at .trees/$branch"
+                setup_node_modules_link ".trees/$branch" "$branch"
                 ((created_count++))
             else
                 print_colored "$RED" "❌ Failed to create worktree for $branch"
@@ -684,7 +688,7 @@ run_worktrees() {
             # Open new terminal window and run npm commands
             osascript -e "
             tell application \"Terminal\"
-                do script \"cd '$worktree_path' && echo 'Installing dependencies for $branch...' && npm i && echo 'Starting development server on port $use_port...' && npm run dev -- -p $use_port\"
+                do script \"cd '$worktree_path' && echo 'Starting development server on port $use_port...' && npm run dev -- -p $use_port\"
                 set custom title of front window to \"$branch:$use_port\"
                 set title displays custom title of front window to true
                 activate
