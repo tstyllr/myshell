@@ -98,6 +98,34 @@ setup_node_modules_link() {
     fi
 }
 
+# Function to setup .claude and CLAUDE.md symbolic links for worktree
+setup_claude_links() {
+    local worktree_path="$1"
+    local branch_name="$2"
+
+    # Handle .claude directory
+    local main_claude_dir="$(pwd)/.claude"
+    if [ -d "$main_claude_dir" ]; then
+        local worktree_claude_dir="$(pwd)/$worktree_path/.claude"
+        if [ ! -e "$worktree_claude_dir" ]; then
+            if ln -s "$main_claude_dir" "$worktree_claude_dir" 2>/dev/null; then
+                print_colored "$CYAN" "🔗 Linked .claude directory from main project"
+            fi
+        fi
+    fi
+
+    # Handle CLAUDE.md file
+    local main_claude_md="$(pwd)/CLAUDE.md"
+    if [ -f "$main_claude_md" ]; then
+        local worktree_claude_md="$(pwd)/$worktree_path/CLAUDE.md"
+        if [ ! -e "$worktree_claude_md" ]; then
+            if ln -s "$main_claude_md" "$worktree_claude_md" 2>/dev/null; then
+                print_colored "$CYAN" "🔗 Linked CLAUDE.md from main project"
+            fi
+        fi
+    fi
+}
+
 # Function to get next available port starting from given port
 get_next_available_port() {
     local start_port="$1"
@@ -254,6 +282,7 @@ create_worktrees() {
             if git worktree add .trees/"$branch" "$branch" 2>/dev/null; then
                 print_colored "$GREEN" "✅ Worktree created at .trees/$branch"
                 setup_node_modules_link ".trees/$branch" "$branch"
+                setup_claude_links ".trees/$branch" "$branch"
                 ((created_count++))
             else
                 print_colored "$YELLOW" "⚠️  Worktree for $branch may already exist"
@@ -263,6 +292,7 @@ create_worktrees() {
             if git worktree add -b "$branch" .trees/"$branch" 2>/dev/null; then
                 print_colored "$GREEN" "✅ New branch and worktree created at .trees/$branch"
                 setup_node_modules_link ".trees/$branch" "$branch"
+                setup_claude_links ".trees/$branch" "$branch"
                 ((created_count++))
             else
                 print_colored "$RED" "❌ Failed to create worktree for $branch"
